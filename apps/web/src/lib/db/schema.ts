@@ -8,6 +8,7 @@ import {
   integer,
   primaryKey,
   boolean,
+  jsonb,
 } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
@@ -88,6 +89,11 @@ export const authenticators = pgTable(
 // ─── TargetDialer extension tables ───────────────────────────────────────────
 
 export const userRoleEnum = pgEnum("user_role", ["admin", "member"])
+export const calendarAutoJoinEnum = pgEnum("calendar_auto_join", [
+  "all",
+  "keywords",
+  "disabled",
+])
 
 // TargetDialer user extension — links Google identity to Vexa user
 export const tdUsers = pgTable("td_users", {
@@ -96,6 +102,10 @@ export const tdUsers = pgTable("td_users", {
   vexaUserId: text("vexa_user_id"), // Vexa internal user ID (nullable)
   role: userRoleEnum("role").notNull().default("member"),
   googleRefreshToken: text("google_refresh_token"), // Encrypted at rest
+  calendarAutoJoin: calendarAutoJoinEnum("calendar_auto_join")
+    .notNull()
+    .default("all"),
+  calendarKeywords: text("calendar_keywords"), // Comma-separated keywords for "keywords" mode
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 })
 
@@ -106,6 +116,7 @@ export const tdCalendarSubscriptions = pgTable("td_calendar_subscriptions", {
   googleChannelId: text("google_channel_id").unique(),
   resourceId: text("resource_id"),
   calendarId: text("calendar_id").notNull(),
+  syncToken: text("sync_token"), // For incremental sync (delta changes)
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   renewedAt: timestamp("renewed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
@@ -155,5 +166,75 @@ export const tdMeetings = pgTable("td_meetings", {
   meetingEndedAt: timestamp("meeting_ended_at", { withTimezone: true }),
   botStatus: text("bot_status").default("requested"), // requested|joining|awaiting_admission|active|stopping|completed|failed
   segmentCount: text("segment_count").default("0"),
+  restartCount: integer("restart_count").default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+})
+
+// ─── Phase 2: AI Processing tables ──────────────────────────────────────────
+
+export const summaryStatusEnum = pgEnum("summary_status", [
+  "pending",
+  "processing",
+  "completed",
+  "failed",
+])
+
+export const tdSummaries = pgTable("td_summaries", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  meetingId: uuid("meeting_id")
+    .notNull()
+    .references(() => tdMeetings.id, { onDelete: "cascade" }),
+  summaryJson: jsonb("summary_json"), // { keyPoints, actionItems, decisions }
+  modelUsed: text("model_used"),
+  confidence: text("confidence"),
+  status: summaryStatusEnum("status").notNull().default("pending"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+})
+
+export const jobTypeEnum = pgEnum("job_type", [
+  "summarize",
+  "slack_notification",
+])
+export const jobStatusEnum = pgEnum("job_status", [
+  "pending",
+  "processing",
+  "completed",
+  "failed",
+])
+
+export const tdProcessingJobs = pgTable("td_processing_jobs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  jobType: jobTypeEnum("job_type").notNull(),
+  meetingId: uuid("meeting_id")
+    .notNull()
+    .references(() => tdMeetings.id, { onDelete: "cascade" }),
+  status: jobStatusEnum("status").notNull().default("pending"),
+  attempts: integer("attempts").default(0),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+})
+
+// ─── Phase 4: Analytics table ────────────────────────────────────────────────
+
+export const tdMeetingStats = pgTable("td_meeting_stats", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  meetingId: uuid("meeting_id")
+    .notNull()
+    .unique()
+    .references(() => tdMeetings.id, { onDelete: "cascade" }),
+  durationSeconds: integer("duration_seconds"),
+  participantCount: integer("participant_count"),
+  speakerStats: jsonb("speaker_stats"), // { [speaker]: { talkTimeSeconds, segmentCount } }
+  topicsDetected: jsonb("topics_detected"), // string[]
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+})
+
+// ─── Phase 5: Team settings ─────────────────────────────────────────────────
+
+export const tdTeamSettings = pgTable("td_team_settings", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  key: text("key").notNull().unique(),
+  value: text("value"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 })

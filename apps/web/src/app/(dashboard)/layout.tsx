@@ -43,18 +43,36 @@ export default async function DashboardLayout({
           >
             Meetings
           </a>
-          {user.role === "admin" && (
-            <a
-              href="/settings/team"
-              style={{
-                color: "#374151",
-                textDecoration: "none",
-                fontSize: "0.9rem",
-              }}
-            >
-              Team Settings
-            </a>
-          )}
+          <a
+            href="/settings"
+            style={{
+              color: "#374151",
+              textDecoration: "none",
+              fontSize: "0.9rem",
+            }}
+          >
+            Settings
+          </a>
+          <a
+            href="/search"
+            style={{
+              color: "#374151",
+              textDecoration: "none",
+              fontSize: "0.9rem",
+            }}
+          >
+            Search
+          </a>
+          <a
+            href="/analytics"
+            style={{
+              color: "#374151",
+              textDecoration: "none",
+              fontSize: "0.9rem",
+            }}
+          >
+            Analytics
+          </a>
         </div>
 
         {/* Right: User info + sign out */}

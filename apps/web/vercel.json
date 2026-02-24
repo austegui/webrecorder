@@ -1,5 +1,10 @@
 {
   "installCommand": "npm install",
   "buildCommand": "next build",
-  "framework": "nextjs"
+  "framework": "nextjs",
+  "crons": [
+    { "path": "/api/cron/calendar-renewal", "schedule": "0 */6 * * *" },
+    { "path": "/api/cron/bot-health", "schedule": "*/5 * * * *" },
+    { "path": "/api/cron/process-summaries", "schedule": "* * * * *" }
+  ]
 }
