@@ -42,7 +42,13 @@ export default function SettingsPage() {
     setCalendarStatus("connecting")
     setMessage("")
     try {
-      const res = await fetch("/api/calendar/register", { method: "POST" })
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 55000) // 55s (Vercel Pro max is 60s)
+      const res = await fetch("/api/calendar/register", {
+        method: "POST",
+        signal: controller.signal,
+      })
+      clearTimeout(timeout)
       const data = await res.json()
       if (res.ok) {
         setCalendarStatus("connected")
@@ -51,9 +57,13 @@ export default function SettingsPage() {
         setCalendarStatus("error")
         setMessage(data.error || "Failed to connect calendar")
       }
-    } catch {
+    } catch (err) {
       setCalendarStatus("error")
-      setMessage("Network error")
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setMessage("Request timed out — calendar may still be syncing. Refresh the page in a minute.")
+      } else {
+        setMessage("Network error — check your connection and try again")
+      }
     }
   }
 

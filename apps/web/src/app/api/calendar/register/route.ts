@@ -9,10 +9,6 @@ export async function POST() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  if (session.user.role !== "admin") {
-    return NextResponse.json({ error: "Admin only" }, { status: 403 })
-  }
-
   try {
     const result = await registerCalendarWatch(session.user.id)
 
