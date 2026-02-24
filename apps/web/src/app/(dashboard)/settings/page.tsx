@@ -11,12 +11,29 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState("")
 
+  // AI settings state
+  const [aiProvider, setAiProvider] = useState<"anthropic" | "openai">("anthropic")
+  const [aiModel, setAiModel] = useState("")
+  const [aiApiKey, setAiApiKey] = useState("")
+  const [aiHasKey, setAiHasKey] = useState(false)
+  const [aiSaving, setAiSaving] = useState(false)
+  const [aiMessage, setAiMessage] = useState("")
+
   useEffect(() => {
     fetch("/api/settings/auto-join")
       .then((r) => r.json())
       .then((data) => {
         setAutoJoin(data.calendarAutoJoin ?? "all")
         setKeywords(data.calendarKeywords ?? "")
+      })
+      .catch(() => {})
+
+    fetch("/api/settings/ai")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.provider) setAiProvider(data.provider)
+        if (data.model) setAiModel(data.model)
+        setAiHasKey(data.hasApiKey ?? false)
       })
       .catch(() => {})
   }, [])
@@ -189,6 +206,159 @@ export default function SettingsPage() {
         >
           {saving ? "Saving..." : "Save Settings"}
         </button>
+      </div>
+
+      {/* AI Configuration */}
+      <div
+        style={{
+          background: "#fff",
+          borderRadius: "12px",
+          border: "1px solid #e5e7eb",
+          padding: "24px",
+          marginBottom: "24px",
+        }}
+      >
+        <h2 style={{ fontSize: "1.1rem", fontWeight: "600", color: "#111827", marginBottom: "8px" }}>
+          AI Summarization
+        </h2>
+        <p style={{ color: "#6b7280", fontSize: "0.875rem", marginBottom: "16px" }}>
+          Configure the AI provider used to generate meeting summaries.
+          {aiHasKey && (
+            <span style={{ color: "#16a34a", marginLeft: "8px" }}>API key configured</span>
+          )}
+        </p>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "16px" }}>
+          <div>
+            <label style={{ display: "block", fontSize: "0.875rem", color: "#374151", marginBottom: "4px" }}>
+              Provider
+            </label>
+            <select
+              value={aiProvider}
+              onChange={(e) => {
+                const p = e.target.value as "anthropic" | "openai"
+                setAiProvider(p)
+                if (!aiModel || aiModel.startsWith("claude") || aiModel.startsWith("gpt")) {
+                  setAiModel(p === "anthropic" ? "claude-sonnet-4-20250514" : "gpt-4o")
+                }
+              }}
+              style={{
+                width: "100%",
+                padding: "8px 12px",
+                border: "1px solid #d1d5db",
+                borderRadius: "6px",
+                fontSize: "0.875rem",
+                boxSizing: "border-box",
+              }}
+            >
+              <option value="anthropic">Anthropic (Claude)</option>
+              <option value="openai">OpenAI (GPT)</option>
+            </select>
+          </div>
+
+          <div>
+            <label style={{ display: "block", fontSize: "0.875rem", color: "#374151", marginBottom: "4px" }}>
+              Model ID
+            </label>
+            <input
+              type="text"
+              value={aiModel}
+              onChange={(e) => setAiModel(e.target.value)}
+              placeholder={aiProvider === "anthropic" ? "claude-sonnet-4-20250514" : "gpt-4o"}
+              style={{
+                width: "100%",
+                padding: "8px 12px",
+                border: "1px solid #d1d5db",
+                borderRadius: "6px",
+                fontSize: "0.875rem",
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
+
+          <div>
+            <label style={{ display: "block", fontSize: "0.875rem", color: "#374151", marginBottom: "4px" }}>
+              API Key {aiHasKey && <span style={{ color: "#6b7280" }}>(leave blank to keep current)</span>}
+            </label>
+            <input
+              type="password"
+              value={aiApiKey}
+              onChange={(e) => setAiApiKey(e.target.value)}
+              placeholder={aiHasKey ? "••••••••••••••••" : "sk-..."}
+              style={{
+                width: "100%",
+                padding: "8px 12px",
+                border: "1px solid #d1d5db",
+                borderRadius: "6px",
+                fontSize: "0.875rem",
+                fontFamily: "monospace",
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
+        </div>
+
+        <button
+          onClick={async () => {
+            if (!aiApiKey && !aiHasKey) {
+              setAiMessage("API key is required")
+              return
+            }
+            setAiSaving(true)
+            setAiMessage("")
+            try {
+              const res = await fetch("/api/settings/ai", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  provider: aiProvider,
+                  model: aiModel || (aiProvider === "anthropic" ? "claude-sonnet-4-20250514" : "gpt-4o"),
+                  apiKey: aiApiKey || "KEEP_EXISTING",
+                }),
+              })
+              if (res.ok) {
+                setAiMessage("AI settings saved")
+                setAiHasKey(true)
+                setAiApiKey("")
+              } else {
+                const data = await res.json()
+                setAiMessage(data.error || "Failed to save")
+              }
+            } catch {
+              setAiMessage("Network error")
+            } finally {
+              setAiSaving(false)
+            }
+          }}
+          disabled={aiSaving}
+          style={{
+            padding: "8px 20px",
+            background: "#2563eb",
+            color: "#fff",
+            border: "none",
+            borderRadius: "6px",
+            fontSize: "0.875rem",
+            cursor: aiSaving ? "wait" : "pointer",
+            opacity: aiSaving ? 0.7 : 1,
+          }}
+        >
+          {aiSaving ? "Saving..." : "Save AI Settings"}
+        </button>
+
+        {aiMessage && (
+          <p
+            style={{
+              marginTop: "12px",
+              padding: "8px 12px",
+              borderRadius: "6px",
+              background: aiMessage.includes("Failed") || aiMessage.includes("error") || aiMessage.includes("required") ? "#fef2f2" : "#f0fdf4",
+              color: aiMessage.includes("Failed") || aiMessage.includes("error") || aiMessage.includes("required") ? "#dc2626" : "#16a34a",
+              fontSize: "0.875rem",
+            }}
+          >
+            {aiMessage}
+          </p>
+        )}
       </div>
 
       {/* Integrations Link */}
