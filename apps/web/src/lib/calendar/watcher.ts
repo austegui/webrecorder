@@ -10,25 +10,44 @@ import { getCalendarClient } from "./token"
 const PUBLIC_URL = process.env.PUBLIC_URL || "https://web-three-teal-87.vercel.app"
 
 /**
- * Register a Google Calendar push notification channel for a user.
+ * Register a Google Calendar connection for a user.
+ * Tries push notifications first; falls back to poll-only mode.
  */
 export async function registerCalendarWatch(userId: string) {
   const calendar = await getCalendarClient(userId)
-  const channelId = crypto.randomUUID()
 
-  const response = await calendar.events.watch({
-    calendarId: "primary",
-    requestBody: {
-      id: channelId,
-      type: "web_hook",
-      address: `${PUBLIC_URL}/api/calendar/webhook`,
-      expiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
-    },
-  })
+  let channelId: string | null = null
+  let resourceId: string | null = null
+  let expiresAt: Date
+  let mode: "push" | "poll"
 
-  // Do an initial full sync to get the syncToken
+  // Try registering push notifications
+  try {
+    channelId = crypto.randomUUID()
+    const response = await calendar.events.watch({
+      calendarId: "primary",
+      requestBody: {
+        id: channelId,
+        type: "web_hook",
+        address: `${PUBLIC_URL}/api/calendar/webhook`,
+        expiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      },
+    })
+    resourceId = response.data.resourceId ?? null
+    expiresAt = new Date(Number(response.data.expiration))
+    mode = "push"
+  } catch {
+    // Push failed (domain not verified, etc.) — use poll-only mode
+    channelId = `poll_${crypto.randomUUID()}`
+    resourceId = null
+    expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000) // 1 year
+    mode = "poll"
+  }
+
+  // Do initial full sync to get syncToken and detect existing Meet events
   let syncToken: string | undefined
   let pageToken: string | undefined
+  let meetEventsFound = 0
 
   do {
     const events = await calendar.events.list({
@@ -36,7 +55,75 @@ export async function registerCalendarWatch(userId: string) {
       pageToken,
       maxResults: 250,
       singleEvents: true,
+      timeMin: new Date().toISOString(), // Only future events
+      orderBy: "startTime",
     })
+
+    // Process events with Meet links during initial sync
+    for (const event of events.data.items ?? []) {
+      if (event.status === "cancelled") continue
+
+      const meetLink =
+        event.conferenceData?.entryPoints?.find(
+          (e) => e.entryPointType === "video"
+        )?.uri ?? event.hangoutLink
+
+      if (!meetLink) continue
+
+      // Check user auto-join preferences
+      const tdUser = await db
+        .select({
+          calendarAutoJoin: tdUsers.calendarAutoJoin,
+          calendarKeywords: tdUsers.calendarKeywords,
+        })
+        .from(tdUsers)
+        .where(eq(tdUsers.authUserId, userId))
+        .limit(1)
+
+      const autoJoin = tdUser[0]?.calendarAutoJoin ?? "all"
+      if (autoJoin === "disabled") continue
+
+      if (autoJoin === "keywords") {
+        const keywords = tdUser[0]?.calendarKeywords
+          ?.split(",")
+          .map((k) => k.trim().toLowerCase())
+          .filter(Boolean)
+        if (keywords?.length) {
+          const title = (event.summary ?? "").toLowerCase()
+          if (!keywords.some((kw) => title.includes(kw))) continue
+        }
+      }
+
+      // Check if we already have this meeting
+      const existing = await db
+        .select({ id: tdMeetings.id })
+        .from(tdMeetings)
+        .where(
+          and(
+            eq(tdMeetings.calendarEventId, event.id!),
+            eq(tdMeetings.userId, userId)
+          )
+        )
+        .limit(1)
+
+      if (existing.length > 0) continue
+
+      await db.insert(tdMeetings).values({
+        vexaMeetingId: `cal_${event.id}_${Date.now()}`,
+        platform: "google_meet",
+        userId,
+        calendarEventId: event.id!,
+        meetingTitle: event.summary ?? "Untitled Meeting",
+        scheduledStartAt: event.start?.dateTime
+          ? new Date(event.start.dateTime)
+          : event.start?.date
+            ? new Date(event.start.date)
+            : null,
+        botStatus: "requested",
+      })
+      meetEventsFound++
+    }
+
     pageToken = events.data.nextPageToken ?? undefined
     if (!pageToken) {
       syncToken = events.data.nextSyncToken ?? undefined
@@ -46,21 +133,20 @@ export async function registerCalendarWatch(userId: string) {
   await db.insert(tdCalendarSubscriptions).values({
     userId,
     googleChannelId: channelId,
-    resourceId: response.data.resourceId ?? "",
+    resourceId,
     calendarId: "primary",
     syncToken: syncToken ?? null,
-    expiresAt: new Date(Number(response.data.expiration)),
+    expiresAt,
   })
 
-  return { channelId, resourceId: response.data.resourceId }
+  return { channelId, resourceId, mode, meetEventsFound }
 }
 
 /**
- * Process a Google Calendar push notification.
- * Uses incremental sync (syncToken) to detect new/changed events with Meet links.
+ * Process calendar changes using incremental sync (delta).
+ * Called by push webhook or fallback poll cron.
  */
 export async function processCalendarNotification(channelId: string) {
-  // Look up the subscription
   const sub = await db
     .select()
     .from(tdCalendarSubscriptions)
@@ -74,7 +160,6 @@ export async function processCalendarNotification(channelId: string) {
 
   const { userId, syncToken } = sub[0]
 
-  // Get user's auto-join settings
   const tdUser = await db
     .select({
       calendarAutoJoin: tdUsers.calendarAutoJoin,
@@ -107,13 +192,9 @@ export async function processCalendarNotification(channelId: string) {
         singleEvents: true,
       })
 
-      const events = response.data.items ?? []
-
-      for (const event of events) {
-        // Skip cancelled events
+      for (const event of response.data.items ?? []) {
         if (event.status === "cancelled") continue
 
-        // Check for Google Meet link
         const meetLink =
           event.conferenceData?.entryPoints?.find(
             (e) => e.entryPointType === "video"
@@ -121,14 +202,11 @@ export async function processCalendarNotification(channelId: string) {
 
         if (!meetLink) continue
 
-        // Apply auto-join filter
         if (autoJoin === "keywords" && keywords?.length) {
           const title = (event.summary ?? "").toLowerCase()
-          const matchesKeyword = keywords.some((kw) => title.includes(kw))
-          if (!matchesKeyword) continue
+          if (!keywords.some((kw) => title.includes(kw))) continue
         }
 
-        // Check if we already have this meeting
         const existing = await db
           .select({ id: tdMeetings.id })
           .from(tdMeetings)
@@ -142,7 +220,6 @@ export async function processCalendarNotification(channelId: string) {
 
         if (existing.length > 0) continue
 
-        // Create meeting record
         await db.insert(tdMeetings).values({
           vexaMeetingId: `cal_${event.id}_${Date.now()}`,
           platform: "google_meet",
@@ -164,14 +241,12 @@ export async function processCalendarNotification(channelId: string) {
       }
     } while (pageToken)
   } catch (error: unknown) {
-    // If sync token is invalid (410 Gone), do a full re-sync
     if (
       error instanceof Error &&
       "code" in error &&
       (error as { code: number }).code === 410
     ) {
-      console.log("Sync token expired, performing full re-sync")
-      // Clear sync token to force full sync on next notification
+      console.log("Sync token expired, clearing for full re-sync")
       await db
         .update(tdCalendarSubscriptions)
         .set({ syncToken: null })
@@ -181,7 +256,6 @@ export async function processCalendarNotification(channelId: string) {
     throw error
   }
 
-  // Save new sync token
   if (newSyncToken) {
     await db
       .update(tdCalendarSubscriptions)
